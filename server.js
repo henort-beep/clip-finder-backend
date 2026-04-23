@@ -5,7 +5,7 @@ const https = require("https");
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 function extractVideoId(url) {
@@ -44,6 +44,12 @@ async function getTranscript(videoId) {
     .join(" ");
   return texts;
 }
+
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+  next();
+});
 
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "Clip Finder Backend rodando!" });
