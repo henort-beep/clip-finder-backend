@@ -20,6 +20,10 @@ function extractVideoId(url) {
   return null;
 }
 
+app.get("/", (req, res) => {
+  res.json({ status: "ok", message: "Clip Finder Backend rodando!" });
+});
+
 app.get("/api/transcript", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: "Parâmetro 'url' é obrigatório." });
@@ -38,4 +42,4 @@ app.get("/api/transcript", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`✅ Rodando na porta ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`Rodando na porta ${PORT}`));
