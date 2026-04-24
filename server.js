@@ -20,10 +20,13 @@ function extractVideoId(url) {
   return null;
 }
 
-function fetchUrl(url, options = {}) {
+function httpRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith("https") ? https : require("http");
-    const req = mod.request(url, { headers: { "User-Agent": "Mozilla/5.0", ...options.headers }, method: options.method || "GET" }, (res) => {
+    const req = mod.request(url, {
+      headers: { "User-Agent": "Mozilla/5.0", ...options.headers },
+      method: options.method || "GET"
+    }, (res) => {
       let data = "";
       res.on("data", (chunk) => (data += chunk));
       res.on("end", () => resolve({ status: res.statusCode, body: data }));
@@ -35,40 +38,39 @@ function fetchUrl(url, options = {}) {
 }
 
 async function getTranscript(videoId) {
-  const { body: pageHtml } = await fetchUrl(`https://www.youtube.com/watch?v=${videoId}`);
+  const { body: pageHtml } = await httpRequest(`https://www.youtube.com/watch?v=${videoId}`);
   const captionsMatch = pageHtml.match(/"captions":(.+?),"videoDetails"/s);
   if (!captionsMatch) throw new Error("Legendas não encontradas.");
   const captions = JSON.parse(captionsMatch[1]);
   const tracks = captions?.playerCaptionsTracklistRenderer?.captionTracks;
   if (!tracks || tracks.length === 0) throw new Error("Nenhuma legenda disponível.");
   const track = tracks.find(t => t.languageCode === "pt") || tracks[0];
-  const { body: xmlData } = await fetchUrl(track.baseUrl);
+  const { body: xmlData } = await httpRequest(track.baseUrl);
   return [...xmlData.matchAll(/<text[^>]*>([^<]*)<\/text>/g)]
     .map(m => m[1].replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&#39;/g,"'").replace(/&quot;/g,'"'))
     .join(" ");
 }
 
-async function analyzeWithClaude(transcript) {
+async function analyzeWithGemini(transcript) {
   const truncated = transcript.slice(0, 12000);
+  const apiKey = process.env.GEMINI_API_KEY;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
   const payload = JSON.stringify({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 1000,
-    system: `Você é um especialista em criação de conteúdo para YouTube, focado em cortes de podcast que viralizam. Analise transcrições e identifique os 5 melhores momentos para fazer cortes curtos. Responda APENAS em JSON válido, sem markdown. Formato: {"clips":[{"titulo":"Título chamativo (max 60 chars)","tipo":"polêmico|história|informação|humor|conselho","trecho":"Trecho da transcrição","motivo":"Por que vai performar bem (1 frase)","gancho":"Sugestão de frase para thumbnail"}]}`,
-    messages: [{ role: "user", content: `Analise e encontre os 5 melhores momentos:\n\n${truncated}` }]
+    contents: [{
+      parts: [{
+        text: `Você é um especialista em criação de conteúdo para YouTube, focado em cortes de podcast que viralizam. Analise a transcrição abaixo e identifique os 5 melhores momentos para fazer cortes curtos (Shorts/Reels). Responda APENAS em JSON válido, sem markdown. Formato: {"clips":[{"titulo":"Título chamativo (max 60 chars)","tipo":"polêmico|história|informação|humor|conselho","trecho":"Trecho da transcrição","motivo":"Por que vai performar bem (1 frase)","gancho":"Sugestão de frase para thumbnail"}]}\n\nTranscrição:\n${truncated}`
+      }]
+    }]
   });
 
-  const { body } = await fetchUrl("https://api.anthropic.com/v1/messages", {
+  const { body } = await httpRequest(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01"
-    },
+    headers: { "Content-Type": "application/json" },
     body: payload
   });
 
   const data = JSON.parse(body);
-  const text = data.content.map(i => i.text || "").join("");
+  const text = data.candidates[0].content.parts[0].text;
   return JSON.parse(text.replace(/```json|```/g, "").trim());
 }
 
@@ -91,7 +93,7 @@ app.post("/api/analyze", async (req, res) => {
   const { transcript } = req.body;
   if (!transcript) return res.status(400).json({ error: "Transcrição não fornecida." });
   try {
-    const result = await analyzeWithClaude(transcript);
+    const result = await analyzeWithGemini(transcript);
     return res.json(result);
   } catch (err) {
     return res.status(500).json({ error: err.message });
