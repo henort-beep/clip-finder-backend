@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: clip-finder-backend
+    env: node
+    buildCommand: npm install && pip install yt-dlp
+    startCommand: node server.js
