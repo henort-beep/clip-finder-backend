@@ -1,9 +1,6 @@
 const express = require("express");
 const cors = require("cors");
 const https = require("https");
-const { execSync } = require("child_process");
-const fs = require("fs");
-const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -23,38 +20,65 @@ function extractVideoId(url) {
   return null;
 }
 
+function httpGet(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      }
+    }, (res) => {
+      // Seguir redirects
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return httpGet(res.headers.location).then(resolve).catch(reject);
+      }
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => resolve(data));
+    }).on("error", reject);
+  });
+}
+
 async function getTranscript(videoId) {
-  const tmpDir = "/tmp";
-  const outPath = path.join(tmpDir, videoId);
+  const html = await httpGet(`https://www.youtube.com/watch?v=${videoId}&hl=pt`);
 
-  try {
-    // Instala yt-dlp se não existir
-    try { execSync("which yt-dlp"); }
-    catch { execSync("pip install yt-dlp --break-system-packages 2>/dev/null || pip3 install yt-dlp 2>/dev/null || true"); }
-
-    // Baixa legenda
-    execSync(`yt-dlp --write-auto-sub --sub-lang pt,en --skip-download --no-warnings -o "${outPath}" "https://www.youtube.com/watch?v=${videoId}" 2>/dev/null`, { timeout: 30000 });
-
-    // Procura o arquivo de legenda
-    const files = fs.readdirSync(tmpDir).filter(f => f.startsWith(videoId) && f.endsWith(".vtt"));
-    if (files.length === 0) throw new Error("Legenda não encontrada.");
-
-    const content = fs.readFileSync(path.join(tmpDir, files[0]), "utf8");
-
-    // Limpa o VTT e extrai texto
-    const lines = content.split("\n")
-      .filter(l => !l.match(/^\d{2}:\d{2}/) && !l.match(/^WEBVTT/) && !l.match(/^NOTE/) && l.trim() !== "")
-      .map(l => l.replace(/<[^>]+>/g, "").trim())
-      .filter(l => l.length > 0);
-
-    // Remove duplicatas consecutivas
-    const unique = lines.filter((l, i) => l !== lines[i - 1]);
-    return unique.join(" ");
-
-  } finally {
-    // Limpa arquivos temporários
-    try { execSync(`rm -f ${outPath}*`); } catch {}
+  // Tenta extrair captions
+  const match = html.match(/"captions":(\{"playerCaptionsTracklistRenderer":.+?\}),"videoDetails"/s);
+  if (!match) {
+    // Tenta formato alternativo
+    const match2 = html.match(/\"captions\":({.+?}),\"videoDetails\"/);
+    if (!match2) throw new Error("Legendas não encontradas. Verifique se o vídeo tem transcrição disponível.");
   }
+
+  const captionsJson = match ? match[1] : null;
+  const captions = JSON.parse(captionsJson);
+  const tracks = captions?.playerCaptionsTracklistRenderer?.captionTracks;
+
+  if (!tracks || tracks.length === 0) throw new Error("Nenhuma legenda disponível neste vídeo.");
+
+  const track = tracks.find(t => t.languageCode === "pt") ||
+                tracks.find(t => t.languageCode === "pt-BR") ||
+                tracks.find(t => t.kind === "asr") ||
+                tracks[0];
+
+  const xmlUrl = track.baseUrl + "&fmt=vtt";
+  const xml = await httpGet(xmlUrl);
+
+  const texts = [...xml.matchAll(/<text[^>]*>([^<]*)<\/text>/g)]
+    .map(m => m[1]
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .trim()
+    )
+    .filter(t => t.length > 0)
+    .join(" ");
+
+  if (!texts || texts.length < 50) throw new Error("Transcrição muito curta ou vazia.");
+  return texts;
 }
 
 async function analyzeWithGemini(transcript) {
